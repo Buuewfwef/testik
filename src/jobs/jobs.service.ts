@@ -5,7 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export class JobsService {
   private running = 0;
   private readonly concurrency = 8;
-  private timer: NodeJS.Timeout | null = null;//)
+  private timer: NodeJS.Timeout | null = null;
   private deliverFn: ((orderId: string) => Promise<void>) | null = null;
 
   constructor(private readonly prisma: PrismaService) {}
@@ -27,11 +27,32 @@ export class JobsService {
     }
   }
 
-  async enqueueDeliver(orderId: string): Promise<void> {
+  async enqueueDeliver(orderId: string, priority = 10): Promise<void> {
     await this.prisma.job.create({
-      data: { type: 'deliver', orderId, status: 'pending' },
+      data: { type: 'deliver', orderId, status: 'pending', priority },
     });
     void this.pump();
+  }
+
+  async queueStats() {
+    const [pending, processing, done] = await Promise.all([
+      this.prisma.job.count({ where: { type: 'deliver', status: 'pending' } }),
+      this.prisma.job.count({ where: { type: 'deliver', status: 'processing' } }),
+      this.prisma.job.count({ where: { type: 'deliver', status: 'done' } }),
+    ]);
+
+    const deliveredOrders = await this.prisma.order.count({
+      where: { status: { in: ['delivered', 'partially_fulfilled'] } },
+    });
+
+    return {
+      pending_jobs: pending,
+      processing_jobs: processing,
+      done_jobs: done,
+      delivered_orders: deliveredOrders,
+      worker_concurrency: this.concurrency,
+      running_workers: this.running,
+    };
   }
 
   private async pump(): Promise<void> {
@@ -55,7 +76,7 @@ export class JobsService {
       WHERE id = (
         SELECT id FROM jobs
         WHERE status = 'pending' AND run_at <= NOW()
-        ORDER BY created_at
+        ORDER BY priority DESC, created_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       )
@@ -72,6 +93,14 @@ export class JobsService {
   }): Promise<void> {
     try {
       if (job.type === 'deliver' && job.order_id && this.deliverFn) {
+        const order = await this.prisma.order.findUnique({ where: { id: job.order_id } });
+        if (order?.status === 'created' || order?.status === 'payment_failed') {
+          await this.prisma.job.update({
+            where: { id: job.id },
+            data: { status: 'done', lastError: 'skipped_unpaid' },
+          });
+          return;
+        }
         await this.deliverFn(job.order_id);
       }
       await this.prisma.job.update({
@@ -80,7 +109,7 @@ export class JobsService {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.prisma.job.update({
+      await this.prisma.job.updateMany({
         where: { id: job.id },
         data: {
           status: 'pending',

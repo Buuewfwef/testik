@@ -1,11 +1,15 @@
 import { nanoid } from 'nanoid';
 
 export function newOrderId(): string {
-  return `ord_${nanoid(12)}`; //) 
+  return `ord_${nanoid(12)}`;
 }
 
-export function supplierRequestId(orderId: string, supplier: 'A' | 'B'): string {
-  return `${orderId}:${supplier}`;
+export function supplierRequestId(
+  orderId: string,
+  lineItemId: string,
+  supplier: 'A' | 'B',
+): string {
+  return `${orderId}:${lineItemId}:${supplier}`;
 }
 
 export function sleep(ms: number): Promise<void> {

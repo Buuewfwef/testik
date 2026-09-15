@@ -14,15 +14,70 @@ export class LedgerService {
   async recordPayment(tx: Tx, orderId: string, amount: number, currency: string): Promise<void> {
     await this.post(tx, [
       { orderId, account: ACCOUNTS.cash, direction: 'debit', amount, currency, reason: 'payment' },
-      { orderId, account: ACCOUNTS.deferred, direction: 'credit', amount, currency, reason: 'payment' },
+      {
+        orderId,
+        account: ACCOUNTS.deferred,
+        direction: 'credit',
+        amount,
+        currency,
+        reason: 'payment',
+      },
     ]);
   }
 
-  async recordDelivery(tx: Tx, orderId: string, amount: number, currency: string): Promise<void> {
+  async recordDelivery(
+    tx: Tx,
+    orderId: string,
+    lineItemId: string,
+    amount: number,
+    currency: string,
+  ): Promise<void> {
+    const reason = `delivery:${lineItemId}`;
     await this.post(tx, [
-      { orderId, account: ACCOUNTS.deferred, direction: 'debit', amount, currency, reason: 'delivery' },
-      { orderId, account: ACCOUNTS.revenue, direction: 'credit', amount, currency, reason: 'delivery' },
+      { orderId, lineItemId, account: ACCOUNTS.deferred, direction: 'debit', amount, currency, reason },
+      { orderId, lineItemId, account: ACCOUNTS.revenue, direction: 'credit', amount, currency, reason },
     ]);
+  }
+
+  async recordRefund(
+    tx: Tx,
+    orderId: string,
+    lineItemId: string,
+    amount: number,
+    currency: string,
+  ): Promise<void> {
+    const reason = `refund:${lineItemId}`;
+    await this.post(tx, [
+      { orderId, lineItemId, account: ACCOUNTS.deferred, direction: 'debit', amount, currency, reason },
+      { orderId, lineItemId, account: ACCOUNTS.cash, direction: 'credit', amount, currency, reason },
+    ]);
+  }
+
+  async orderMoney(orderId: string) {
+    const rows = await this.prisma.ledgerEntry.findMany({ where: { orderId } });
+
+    let paid = 0;
+    let delivered = 0;
+    let refunded = 0;
+
+    for (const r of rows) {
+      if (r.reason === 'payment' && r.account === ACCOUNTS.cash && r.direction === 'debit') {
+        paid += r.amount;
+      }
+      if (r.reason.startsWith('delivery:') && r.account === ACCOUNTS.revenue && r.direction === 'credit') {
+        delivered += r.amount;
+      }
+      if (r.reason.startsWith('refund:') && r.account === ACCOUNTS.cash && r.direction === 'credit') {
+        refunded += r.amount;
+      }
+    }
+
+    return {
+      paid,
+      delivered,
+      refunded,
+      balanced: paid === delivered + refunded,
+    };
   }
 
   async totals() {
@@ -63,6 +118,7 @@ export class LedgerService {
     tx: Tx,
     entries: Array<{
       orderId: string;
+      lineItemId?: string;
       account: string;
       direction: string;
       amount: number;
@@ -72,7 +128,15 @@ export class LedgerService {
   ): Promise<void> {
     for (const e of entries) {
       await tx.ledgerEntry.createMany({
-        data: e,
+        data: {
+          orderId: e.orderId,
+          lineItemId: e.lineItemId ?? null,
+          account: e.account,
+          direction: e.direction,
+          amount: e.amount,
+          currency: e.currency,
+          reason: e.reason,
+        },
         skipDuplicates: true,
       });
     }

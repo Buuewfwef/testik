@@ -12,9 +12,18 @@ enum OrderStatus {
   paid
   delivering
   delivered
+  partially_fulfilled
   payment_failed
   out_of_stock
   delivery_failed
+}
+
+enum LineItemStatus {
+  pending
+  delivering
+  delivered
+  failed
+  refunded
 }
 
 model Product {
@@ -24,6 +33,7 @@ model Product {
   price     Int
   currency  String   @default("RUB")
   image     String
+  supplier  String   @default("A")
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at")
   stock     SkuStock?
@@ -58,25 +68,51 @@ model InventoryKey {
 }
 
 model Order {
-  id          String      @id
+  id          String         @id
   sku         String
   amount      Int
   currency    String
-  status      OrderStatus @default(created)
+  status      OrderStatus    @default(created)
   code        String?
   supplier    String?
-  paidAt      DateTime?   @map("paid_at")
-  deliveredAt DateTime?   @map("delivered_at")
-  lastError   String?     @map("last_error")
-  createdAt   DateTime    @default(now()) @map("created_at")
-  updatedAt   DateTime    @updatedAt @map("updated_at")
-  product     Product     @relation(fields: [sku], references: [sku])
+  paidAt      DateTime?      @map("paid_at")
+  deliveredAt DateTime?      @map("delivered_at")
+  lastError   String?        @map("last_error")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+  product     Product        @relation(fields: [sku], references: [sku])
+  lineItems   OrderLineItem[]
   deliveries  Delivery[]
   ledger      LedgerEntry[]
   jobs        Job[]
+  events      OrderEvent[]
 
   @@index([status, updatedAt], map: "idx_orders_status_updated")
   @@map("orders")
+}
+
+model OrderLineItem {
+  id           String         @id @default(cuid())
+  orderId      String         @map("order_id")
+  lineNo       Int            @map("line_no")
+  sku          String
+  supplier     String
+  amount       Int
+  currency     String
+  status       LineItemStatus @default(pending)
+  code         String?
+  supplierUsed String?        @map("supplier_used")
+  lastError    String?        @map("last_error")
+  deliveredAt  DateTime?      @map("delivered_at")
+  refundedAt   DateTime?      @map("refunded_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+  order        Order          @relation(fields: [orderId], references: [id])
+  delivery     Delivery?
+
+  @@unique([orderId, lineNo], map: "order_line_no")
+  @@index([orderId, status], map: "idx_line_items_order_status")
+  @@map("order_line_items")
 }
 
 model PaymentEvent {
@@ -94,31 +130,49 @@ model PaymentEvent {
 }
 
 model Delivery {
-  id        String   @id @default(cuid())
-  orderId   String   @unique @map("order_id")
-  requestId String   @unique @map("request_id")
-  supplier  String
-  code      String
-  createdAt DateTime @default(now()) @map("created_at")
-  order     Order    @relation(fields: [orderId], references: [id])
+  id         String        @id @default(cuid())
+  orderId    String        @map("order_id")
+  lineItemId String        @unique @map("line_item_id")
+  requestId  String        @unique @map("request_id")
+  supplier   String
+  code       String        @unique
+  createdAt  DateTime      @default(now()) @map("created_at")
+  order      Order         @relation(fields: [orderId], references: [id])
+  lineItem   OrderLineItem @relation(fields: [lineItemId], references: [id])
 
+  @@index([orderId], map: "idx_deliveries_order")
   @@map("deliveries")
 }
 
 model LedgerEntry {
-  id        String   @id @default(cuid())
-  orderId   String   @map("order_id")
-  account   String
-  direction String
-  amount    Int
-  currency  String
-  reason    String
-  createdAt DateTime @default(now()) @map("created_at")
-  order     Order    @relation(fields: [orderId], references: [id])
+  id         String   @id @default(cuid())
+  orderId    String   @map("order_id")
+  lineItemId String?  @map("line_item_id")
+  account    String
+  direction  String
+  amount     Int
+  currency   String
+  reason     String
+  createdAt  DateTime @default(now()) @map("created_at")
+  order      Order    @relation(fields: [orderId], references: [id])
 
   @@unique([orderId, reason, account, direction], map: "ledger_idempotency")
   @@index([account], map: "idx_ledger_account")
+  @@index([orderId, createdAt], map: "idx_ledger_order_time")
   @@map("ledger_entries")
+}
+
+model OrderEvent {
+  id         String   @id @default(cuid())
+  orderId    String   @map("order_id")
+  lineItemId String?  @map("line_item_id")
+  type       String
+  payload    Json
+  createdAt  DateTime @default(now()) @map("created_at")
+  order      Order    @relation(fields: [orderId], references: [id])
+
+  @@index([orderId, createdAt], map: "idx_order_events_order_time")
+  @@map("order_events")
 }
 
 model Job {
@@ -126,24 +180,36 @@ model Job {
   type      String
   orderId   String?  @map("order_id")
   status    String   @default("pending")
+  priority  Int      @default(0)
   attempts  Int      @default(0)
   runAt     DateTime @default(now()) @map("run_at")
   lastError String?  @map("last_error")
   createdAt DateTime @default(now()) @map("created_at")
   order     Order?   @relation(fields: [orderId], references: [id])
 
-  @@index([status, runAt], map: "idx_jobs_poll")
+  @@index([status, priority, runAt], map: "idx_jobs_poll")
   @@map("jobs")
 }
 
 model SupplierIssue {
-  requestId String   @id @map("request_id")
-  supplier  String
-  sku       String
-  orderId   String   @map("order_id")
-  code      String
-  createdAt DateTime @default(now()) @map("created_at")
+  requestId  String   @id @map("request_id")
+  supplier   String
+  sku        String
+  orderId    String   @map("order_id")
+  lineItemId String?  @map("line_item_id")
+  code       String
+  createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([orderId], map: "idx_supplier_issues_order")
+  @@index([code], map: "idx_supplier_issues_code")
   @@map("supplier_issues")
+}
+
+model SupplierRateState {
+  supplier  String   @id
+  windowKey String   @map("window_key")
+  used      Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("supplier_rate_state")
 }

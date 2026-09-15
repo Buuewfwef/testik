@@ -8,11 +8,13 @@ import { SuppliersModule } from './suppliers/suppliers.module';
 import { LedgerModule } from './ledger/ledger.module';
 import { JobsModule } from './jobs/jobs.module';
 import { ReconciliationModule } from './reconciliation/reconciliation.module';
+import { OrderEventsModule } from './events/order-events.module';
 import { WorkersHost } from './workers.host';
 
 @Module({
   imports: [
     PrismaModule,
+    OrderEventsModule,
     CatalogModule,
     OrdersModule,
     PaymentsModule,

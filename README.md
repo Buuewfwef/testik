@@ -16,13 +16,13 @@ npm run start:dev
 
 http://localhost:3000
 
-Прогнать всё: `npm test`
+Прогнать всё: `npm test` (этап 1 + этап 2)
 
-Ниже сервер уже должен работать.
+---
 
 ## этап 1 — заказ и выдача
 
-Создать заказ:
+Один товар:
 
 ```
 curl -s -X POST localhost:3000/api/orders \
@@ -30,9 +30,15 @@ curl -s -X POST localhost:3000/api/orders \
   -d '{"sku":"STEAM-TOPUP-500"}'
 ```
 
-Вернётся `id` вроде `ord_...`, статус `created`.
+Несколько товаров (этап 2):
 
-Оплата (свой id и amount из ответа):
+```
+curl -s -X POST localhost:3000/api/orders \
+  -H 'content-type: application/json' \
+  -d '{"items":[{"sku":"STEAM-TOPUP-500"},{"sku":"KEY-CS2-PRIME"}]}'
+```
+
+Оплата (amount = сумма всех позиций):
 
 ```
 curl -s -X POST localhost:3000/webhook/payment \
@@ -41,40 +47,33 @@ curl -s -X POST localhost:3000/webhook/payment \
     "event_id":"evt_1",
     "order_id":"ord_XXXX",
     "status":"paid",
-    "amount":500,
+    "amount":1790,
     "currency":"RUB",
     "created_at":"2025-01-01T12:00:00Z"
   }'
 ```
 
-Посмотреть:
+Статус заказа:
 
 ```
 curl -s localhost:3000/api/orders/ord_XXXX
 ```
 
-Ждём `delivered` и ключ в `code`.
+В ответе `items[]` — каждая позиция со своим статусом и кодом.
 
-## этап 2 — гонка
+### гонка вебхуков
 
 ```
 npm run race
 ```
 
-50 вебхуков paid на один заказ. Должен уйти один ключ.
-
-Повтор с тем же `event_id` проверяется в `npm test`.
-
-## этап 3 — таймаут и запасной поставщик
+### таймаут и fallback A→B
 
 ```
 npm run fallback
 ```
 
-Сначала A зависает (ключ уже выдан, второй не берём).
-Потом A лежит — выдаёт B.
-
-Вручную сломать A:
+Режимы поставщика:
 
 ```
 curl -s -X POST localhost:3000/internal/suppliers/A/behavior \
@@ -82,57 +81,80 @@ curl -s -X POST localhost:3000/internal/suppliers/A/behavior \
   -d '{"mode":"always_timeout"}'
 ```
 
-Ещё есть `always_unavailable`, `always_out_of_stock`, `random`.
-Потом заказ + оплата как в этапе 1. Потом верни `normal`.
+`normal`, `always_timeout`, `always_unavailable`, `always_out_of_stock`, `random`.
 
-## этап 4 — сверка
+### сверка и каталог
 
 ```
 curl -s localhost:3000/api/admin/reconciliation
-```
-
-Списки: оплачен без ключа / ключ без оплаты. Касса — поле `ledger.balanced`.
-
-Зависшие добить:
-
-```
-curl -s -X POST localhost:3000/api/admin/reconciliation/run
-```
-
-Если ключей нет — будет `out_of_stock`, это ок. Положить ключ и повторить:
-
-```
-curl -s -X POST localhost:3000/api/admin/inventory/replenish \
-  -H 'content-type: application/json' \
-  -d '{"sku":"STEAM-TOPUP-500","codes":["TEST-KEY-0001"]}'
-
-curl -s -X POST localhost:3000/api/admin/orders/ord_XXXX/retry
-```
-
-Раз в 5 секунд то же самое делает фон.
-
-## этап 5 — каталог
-
-В сиде ~5000 sku.
-
-```
 curl -s "localhost:3000/api/catalog?limit=20"
-curl -s localhost:3000/api/catalog/explain
 ```
 
-В explain не должно быть seq scan по всей таблице.
+---
+
+## этап 2 — мульти-заказ, злой поставщик, очередь
+
+### задача 1 — частичная выдача и возврат
+
+```
+npm run partial
+```
+
+или вручную: B в режиме `always_out_of_stock`, заказ из двух sku (Steam у A, CS2 у B).
+Ожидание: `partially_fulfilled`, один код, деньги сходятся.
+
+Проверка денег по заказу:
+
+```
+curl -s localhost:3000/api/admin/orders/ord_XXXX/money
+```
+
+`paid = delivered + refunded`, `balanced: true`.
+
+### задача 2 — поставщику нельзя доверять
+
+```
+npm run evil
+```
+
+Режимы:
+
+| mode | что делает |
+|------|------------|
+| `wrong_code` | ответил фейковый код, в БД другой — берём из `supplier_issues` |
+| `error_after_issue` | 503 после выдачи — повтор не дублирует |
+| `duplicate_code` | пытается отдать чужой код — отклоняем, свой код из peek |
+
+Повтор `retry` / вебхука / джобы — без лишних выдач и возвратов (см. тесты).
+
+### задача 3 — лимит поставщика (бонус)
+
+```
+curl -s localhost:3000/api/admin/queue
+```
+
+Показывает: jobs в очереди, выданные заказы, `used/limit` по A и B.
+Лимит: `SUPPLIER_A_RPM`, `SUPPLIER_B_RPM` (по умолчанию 30/мин).
+Оплаченные джобы priority=10, неоплаченные (priority=0) пропускаются.
+
+### задача 4 — состояние на дату (бонус)
+
+```
+curl -s "localhost:3000/api/admin/orders/ord_XXXX/at?ts=2025-01-01T12:00:00.000Z"
+curl -s "localhost:3000/api/admin/ledger/period?from=...&to=..."
+```
+
+История в `order_events` — только append, без переписывания.
+
+---
 
 ## как сделано
 
-Вебхук сразу 200, выдача через очередь в postgres.
+- **Позиции заказа** — `order_line_items`, у каждого свой поставщик из каталога
+- **Деньги** — двойная запись: payment → deferred, delivery → revenue, refund → cash
+- **Идемпотентность** — `event_id`, `request_id = order:line:supplier`, unique на delivery.code
+- **Поставщик** — ответу не верим, источник правды `supplier_issues` + peek при любой ошибке
+- **Очередь** — postgres jobs, SKIP LOCKED, priority, rate limiter на вызов supplier
+- **События** — append-only `order_events` для replay на дату
 
-Заказы не пересекаются: лок по order_id. event_id уникальный.
-
-Поставщику всегда тот же request_id. Завис — не значит «не выдал», на B не прыгаем.
-B только если A точно не взял ключ.
-
-Нет ключей — out_of_stock, заказ не умирает.
-
-Масштаб: несколько api, очередь выдачи отдельно, витрину в кэш.
-
-~3 часа.
+Время: этап 1 ~3ч, этап 2 ~4ч.

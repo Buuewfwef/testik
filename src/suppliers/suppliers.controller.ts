@@ -22,7 +22,16 @@ class IssueDto {
 }
 
 class BehaviorDto {
-  @IsIn(['normal', 'always_timeout', 'always_unavailable', 'always_out_of_stock', 'random'])
+  @IsIn([
+    'normal',
+    'always_timeout',
+    'always_unavailable',
+    'always_out_of_stock',
+    'random',
+    'duplicate_code',
+    'wrong_code',
+    'error_after_issue',
+  ])
   mode!: SupplierMode;
 }
 

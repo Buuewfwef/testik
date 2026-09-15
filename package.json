@@ -14,7 +14,9 @@
     "test": "jest --config ./test/jest-e2e.json --runInBand --forceExit",
     "test:e2e": "jest --config ./test/jest-e2e.json --runInBand --forceExit",
     "race": "ts-node scripts/race-webhooks.ts",
-    "fallback": "ts-node scripts/fallback-timeout.ts"
+    "fallback": "ts-node scripts/fallback-timeout.ts",
+    "partial": "ts-node scripts/partial-order.ts",
+    "evil": "ts-node scripts/evil-supplier.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

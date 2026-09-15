@@ -37,11 +37,16 @@ type SeedProduct = {
   price: number;
   currency: string;
   image: string;
+  supplier: string;
   isActive: boolean;
 };
 
 async function main() {
-  const products: SeedProduct[] = CATALOG_PRODUCTS.map((p) => ({ ...p, isActive: true }));
+  const products: SeedProduct[] = CATALOG_PRODUCTS.map((p, i) => ({
+    ...p,
+    supplier: i % 2 === 0 ? 'A' : 'B',
+    isActive: true,
+  }));
 
   for (let i = 1; i <= 5000; i++) {
     const type = TYPES[i % TYPES.length];
@@ -52,6 +57,7 @@ async function main() {
       price: 100 + (i % 50) * 10,
       currency: 'RUB',
       image: 'assets/gen.png',
+      supplier: i % 2 === 0 ? 'A' : 'B',
       isActive: true,
     });
   }
@@ -61,6 +67,13 @@ async function main() {
     await prisma.product.createMany({
       data: products.slice(i, i + chunk),
       skipDuplicates: true,
+    });
+  }
+
+  for (const p of products) {
+    await prisma.product.update({
+      where: { sku: p.sku },
+      data: { supplier: p.supplier },
     });
   }
 

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { SupplierRateLimiterService } from './supplier-rate-limiter.service';
 import { SuppliersService } from './suppliers.service';
 import {
   IssueOk,
@@ -12,13 +13,17 @@ export class SupplierClient {
   private readonly timeoutMs = Number(process.env.SUPPLIER_CLIENT_TIMEOUT_MS ?? 1500);
   private readonly inFlight = new Map<string, Promise<IssueOk>>();
 
-  constructor(private readonly suppliers: SuppliersService) {}
+  constructor(
+    private readonly suppliers: SuppliersService,
+    private readonly rateLimiter: SupplierRateLimiterService,
+  ) {}
 
   peekIssue(requestId: string): Promise<IssueOk | null> {
     return this.suppliers.peekIssue(requestId);
   }
 
   async issue(supplier: SupplierId, body: IssueRequest): Promise<IssueOk> {
+    await this.rateLimiter.acquire(supplier);
     const work = this.joinOrStart(supplier, body);
 
     let timer: NodeJS.Timeout | undefined;

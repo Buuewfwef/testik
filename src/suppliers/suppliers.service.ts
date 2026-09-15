@@ -18,11 +18,15 @@ const DEFAULT_MODES: Record<SupplierId, SupplierMode> = {
 export class SuppliersService {
   private modes: Record<SupplierId, SupplierMode> = { ...DEFAULT_MODES };
   private readonly timeoutDelayMs = Number(process.env.SUPPLIER_TIMEOUT_DELAY_MS ?? 4000);
+  private lastEvilCode: string | null = null;
 
   constructor(private readonly prisma: PrismaService) {}
 
   setMode(id: SupplierId, mode: SupplierMode): void {
     this.modes[id] = mode;
+    if (mode !== 'duplicate_code') {
+      this.lastEvilCode = null;
+    }
   }
 
   getMode(id: SupplierId): SupplierMode {
@@ -48,11 +52,28 @@ export class SuppliersService {
     }
 
     const mode = this.modes[supplier];
+
     this.maybeFailBeforeIssue(mode);
 
     const claimed = await this.claimKey(supplier, body);
     if (!claimed) {
       throw new SupplierError('out_of_stock', 409);
+    }
+
+    if (mode === 'error_after_issue') {
+      throw new SupplierError('unavailable', 503);
+    }
+
+    if (mode === 'wrong_code') {
+      return { status: 'ok', request_id: body.request_id, code: 'FAKE-CODE-EVIL' };
+    }
+
+    if (mode === 'duplicate_code' && this.lastEvilCode) {
+      return { status: 'ok', request_id: body.request_id, code: this.lastEvilCode };
+    }
+
+    if (mode === 'duplicate_code') {
+      this.lastEvilCode = claimed;
     }
 
     if (mode === 'always_timeout' || (mode === 'random' && Math.random() < 0.25)) {
@@ -111,6 +132,7 @@ export class SuppliersService {
           supplier,
           sku: body.sku,
           orderId: body.order_id,
+          lineItemId: body.line_item_id ?? null,
           code: rows[0].code,
         },
       });
@@ -122,5 +144,29 @@ export class SuppliersService {
 
       return rows[0].code;
     });
+  }
+
+  async findDuplicateCodes(): Promise<Array<{ code: string; count: number }>> {
+    const rows = await this.prisma.$queryRaw<Array<{ code: string; count: bigint }>>`
+      SELECT code, COUNT(*)::bigint AS count
+      FROM deliveries
+      GROUP BY code
+      HAVING COUNT(*) > 1
+    `;
+    return rows.map((r) => ({ code: r.code, count: Number(r.count) }));
+  }
+
+  async unreconciledIssues(): Promise<
+    Array<{ request_id: string; order_id: string; code: string; line_item_id: string | null }>
+  > {
+    const rows = await this.prisma.$queryRaw<
+      Array<{ request_id: string; order_id: string; code: string; line_item_id: string | null }>
+    >`
+      SELECT si.request_id, si.order_id, si.code, si.line_item_id
+      FROM supplier_issues si
+      LEFT JOIN deliveries d ON d.request_id = si.request_id
+      WHERE d.id IS NULL
+    `;
+    return rows;
   }
 }

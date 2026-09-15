@@ -3,6 +3,7 @@ import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService, Tx } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { JobsService } from '../jobs/jobs.service';
+import { OrderEventsService } from '../events/order-events.service';
 
 export interface PaymentWebhook {
   event_id: string;
@@ -19,6 +20,7 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
     private readonly jobs: JobsService,
+    private readonly events: OrderEventsService,
   ) {}
 
   async handleWebhook(body: PaymentWebhook): Promise<{ accepted: true; duplicate: boolean }> {
@@ -52,7 +54,7 @@ export class PaymentsService {
     });
 
     if (shouldDeliver) {
-      await this.jobs.enqueueDeliver(body.order_id);
+      await this.jobs.enqueueDeliver(body.order_id, 10);
     }
 
     return { accepted: true, duplicate };
@@ -68,7 +70,11 @@ export class PaymentsService {
       return false;
     }
 
-    if (order.status === 'delivered' || order.status === 'delivering') {
+    if (
+      order.status === 'delivered' ||
+      order.status === 'delivering' ||
+      order.status === 'partially_fulfilled'
+    ) {
       return false;
     }
 
@@ -87,6 +93,10 @@ export class PaymentsService {
           data: { status: OrderStatus.paid, paidAt: new Date(), lastError: null },
         });
         await this.ledger.recordPayment(tx, orderId, order.amount, order.currency);
+        await this.events.append(tx, orderId, 'payment_applied', {
+          amount: order.amount,
+          currency: order.currency,
+        });
         return true;
       }
 

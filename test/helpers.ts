@@ -33,10 +33,13 @@ export async function resetStore(app: INestApplication): Promise<void> {
   await db.$executeRawUnsafe(`
     TRUNCATE TABLE
       jobs,
+      order_events,
       ledger_entries,
       deliveries,
+      order_line_items,
       payment_events,
       supplier_issues,
+      supplier_rate_state,
       orders
     RESTART IDENTITY CASCADE
   `);
@@ -63,7 +66,11 @@ export async function resetStore(app: INestApplication): Promise<void> {
     .send({ mode: 'normal' });
 }
 
-export async function createOrder(app: INestApplication, sku = 'STEAM-TOPUP-500', id?: string) {
+export async function createOrder(
+  app: INestApplication,
+  sku = 'STEAM-TOPUP-500',
+  id?: string,
+) {
   const res = await request(app.getHttpServer())
     .post('/api/orders')
     .send(id ? { sku, id } : { sku })
@@ -74,10 +81,26 @@ export async function createOrder(app: INestApplication, sku = 'STEAM-TOPUP-500'
     amount: number;
     currency: string;
     status: string;
+    items?: Array<{ sku: string; amount: number; status: string }>;
   };
 }
 
-export function paidWebhook(order: { id: string; amount: number; currency: string }, eventId: string) {
+export async function createMultiOrder(
+  app: INestApplication,
+  skus: string[],
+  id?: string,
+) {
+  const res = await request(app.getHttpServer())
+    .post('/api/orders')
+    .send(id ? { items: skus.map((sku) => ({ sku })), id } : { items: skus.map((sku) => ({ sku })) })
+    .expect(201);
+  return res.body;
+}
+
+export function paidWebhook(
+  order: { id: string; amount: number; currency: string },
+  eventId: string,
+) {
   return {
     event_id: eventId,
     order_id: order.id,
